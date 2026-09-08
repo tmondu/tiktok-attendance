@@ -43,12 +43,30 @@ const io = new SocketIOServer(httpServer, {
 const PORT = process.env.PORT || 3000;
 const tiktokService = new TikTokService();
 
+// Cấu hình Express
+app.set('etag', false);
+
 // Middlewares
 app.use(cors());
 app.use(express.json());
 
+// Chặn cache để đảm bảo không bao giờ bị 304 khi cập nhật code
+app.use((req, res, next) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+
+  const start = Date.now();
+  res.on('finish', () => {
+    if (!req.originalUrl.startsWith('/socket.io/')) {
+      console.log(`[HTTP ${new Date().toLocaleTimeString('vi-VN')}] ${req.method} ${req.originalUrl} -> Mã: ${res.statusCode} (${Date.now() - start}ms)`);
+    }
+  });
+  next();
+});
+
 if (publicPath) {
-  app.use(express.static(publicPath));
+  app.use(express.static(publicPath, { etag: false, maxAge: 0 }));
 }
 
 // Fallback phục vụ giao diện từ assets nhúng sẵn (đảm bảo file .exe chạy độc lập không cần thư mục public kèm theo)
@@ -64,6 +82,12 @@ app.get('/js/app.js', (req, res) => {
 
 // Socket.IO Events
 io.on('connection', (socket) => {
+  console.log(`🔌 [Socket.IO] Trình duyệt web đã kết nối (Client ID: ${socket.id})`);
+
+  socket.on('disconnect', () => {
+    console.log(`🔌 [Socket.IO] Trình duyệt web đã ngắt kết nối (Client ID: ${socket.id})`);
+  });
+
   // Gửi trạng thái ban đầu và toàn bộ danh sách khi client kết nối
   socket.emit('init', {
     status: tiktokService.status,
@@ -95,19 +119,29 @@ tiktokService.on('reset', () => io.emit('reset'));
 
 // 1. Khởi động điểm danh
 app.post('/api/start', async (req, res) => {
-  const { channel, mode = 'all', keyword = '', caseSensitive = false } = req.body;
+  const { channel, mode = 'all', keyword = '', caseSensitive = false, sessionId, ttTargetIdc } = req.body;
+  console.log(`\n======================================================`);
+  console.log(`👉 [API /api/start] Nhận yêu cầu kết nối từ trình duyệt:`);
+  console.log(`   - Kênh TikTok: "${channel}"`);
+  console.log(`   - Chế độ điểm danh: "${mode}"`);
+  console.log(`   - Từ khóa (nếu có): "${keyword}"`);
+  console.log(`======================================================`);
+
   if (!channel) {
+    console.log(`⚠️ [API /api/start] Thất bại: Không có username kênh.`);
     return res.status(400).json({ success: false, message: 'Vui lòng nhập tên kênh TikTok (username)!' });
   }
 
   try {
-    await tiktokService.start(channel, { mode, keyword, caseSensitive });
+    await tiktokService.start(channel, { mode, keyword, caseSensitive, sessionId, ttTargetIdc });
+    console.log(`✅ [API /api/start] Kết nối thành công tới @${tiktokService.channel}!`);
     res.json({
       success: true,
       message: `Đã kết nối với phiên LIVE của @${tiktokService.channel}`,
       channel: tiktokService.channel
     });
   } catch (err) {
+    console.error(`❌ [API /api/start] Kết nối thất bại:`, err.message);
     res.status(500).json({
       success: false,
       message: err.message || 'Không thể kết nối tới TikTok Live. Hãy chắc chắn kênh đang phát live!'

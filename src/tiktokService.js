@@ -219,6 +219,21 @@ export class TikTokService extends EventEmitter {
   }
 
   /**
+   * Trích xuất username TikTok sạch từ chuỗi nhập vào (hỗ trợ cả URL đầy đủ)
+   */
+  static extractUsername(input) {
+    if (!input) return '';
+    let str = input.trim();
+    const urlMatch = str.match(/tiktok\.com\/@([^/?#&]+)/i);
+    if (urlMatch) {
+      return urlMatch[1];
+    }
+    str = str.replace(/^@+/, '');
+    str = str.split('/')[0].split('?')[0].split('#')[0].trim();
+    return str;
+  }
+
+  /**
    * Bắt đầu kết nối tới kênh TikTok Live
    */
   async start(channelInput, customSettings = {}) {
@@ -226,7 +241,7 @@ export class TikTokService extends EventEmitter {
       await this.stop();
     }
 
-    const cleanChannel = channelInput.trim().replace(/^@/, '');
+    const cleanChannel = TikTokService.extractUsername(channelInput);
     if (!cleanChannel) {
       throw new Error('Username TikTok không hợp lệ.');
     }
@@ -235,11 +250,12 @@ export class TikTokService extends EventEmitter {
     this.settings = { ...this.settings, ...customSettings };
     this.sessionStartTime = new Date();
     this.status = 'connecting';
+    console.log(`\n[TikTok LIVE] Bắt đầu kết nối tới kênh @${this.channel}...`);
     this.emit('status', { status: this.status, channel: this.channel, message: `Đang kết nối tới @${this.channel}...` });
 
     try {
       // Khởi tạo kết nối với tùy chọn tối ưu tài nguyên
-      this.connection = new WebcastPushConnection(this.channel, {
+      const connOptions = {
         processInitialData: true,
         enableExtendedGiftInfo: false,
         enableWebsocketUpgrade: true,
@@ -248,13 +264,28 @@ export class TikTokService extends EventEmitter {
           app_language: 'vi-VN',
           webcast_language: 'vi-VN'
         }
-      });
+      };
+
+      if (customSettings.sessionId) {
+        connOptions.session = {
+          cookie: {
+            type: 'cookie',
+            value: {
+              sessionId: customSettings.sessionId.trim(),
+              ttTargetIdc: customSettings.ttTargetIdc?.trim() || 'useast1a'
+            }
+          }
+        };
+      }
+
+      this.connection = new WebcastPushConnection(this.channel, connOptions);
 
       this._setupListeners();
 
       const state = await this.connection.connect();
       this.status = 'connected';
       this.stats.currentViewers = state?.roomInfo?.user_count || 0;
+      console.log(`✅ [TikTok LIVE] Đã kết nối thành công tới LIVE của @${this.channel} (Room ID: ${state?.roomId || 'N/A'})!`);
 
       this.emit('status', {
         status: this.status,
@@ -267,7 +298,27 @@ export class TikTokService extends EventEmitter {
       return state;
     } catch (err) {
       this.status = 'error';
-      const errMsg = err?.message || 'Không thể kết nối tới TikTok Live. Kênh có thể chưa phát live.';
+      console.error('\n❌ [TikTok Connection Error]:', err?.message || err);
+      if (err.config?.requestErrs) {
+        console.error('[Chi tiết các lỗi request]:', err.config.requestErrs);
+      }
+
+      const allMsgs = [
+        err?.message || '',
+        ...(err?.config?.requestErrs?.map(e => e?.message || '') || [])
+      ].join(' ').toLowerCase();
+
+      let errMsg = '';
+      if (allMsgs.includes('enotfound') || allMsgs.includes('etimedout') || allMsgs.includes('econnrefused') || allMsgs.includes('fetch failed')) {
+        errMsg = 'Lỗi mạng hoặc Tường lửa (Firewall): Máy tính không thể kết nối tới máy chủ TikTok. Vui lòng kiểm tra Internet, tắt hoặc cho phép Windows Defender Firewall cho file .exe, hoặc đổi DNS sang 8.8.8.8.';
+      } else if (allMsgs.includes('failed to retrieve room id') || allMsgs.includes('user_not_found') || allMsgs.includes('offline')) {
+        errMsg = `Không tìm thấy phòng LIVE của @${this.channel}. Hãy kiểm tra xem kênh ĐANG PHÁT TRỰC TIẾP trên TikTok hay không và nhập đúng Username.`;
+      } else if (allMsgs.includes('rate limit')) {
+        errMsg = 'Địa chỉ IP của máy tính đang bị TikTok hoặc máy chủ ký tạm giới hạn tần suất (Rate Limit). Vui lòng thử lại sau vài phút hoặc đổi sang mạng 4G/DNS khác.';
+      } else {
+        errMsg = err?.message || 'Không thể kết nối tới TikTok Live. Kênh có thể chưa phát live.';
+      }
+
       this.emit('status', {
         status: this.status,
         channel: this.channel,

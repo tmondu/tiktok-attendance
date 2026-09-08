@@ -1,6 +1,18 @@
 // TikTok Live Attendance Pro - Frontend Client
 (() => {
+  console.log('🚀 [TikTok Attendance Pro] Frontend client đã nạp xong!');
   const socket = io();
+
+  socket.on('connect', () => {
+    console.log('✅ [Socket.IO] Đã kết nối thành công tới server backend! Client ID:', socket.id);
+  });
+  socket.on('connect_error', (err) => {
+    console.error('❌ [Socket.IO] Lỗi kết nối backend:', err);
+    showMessage('Mất kết nối với máy chủ backend: ' + err.message, true);
+  });
+  socket.on('disconnect', (reason) => {
+    console.warn('⚠️ [Socket.IO] Đã ngắt kết nối với backend. Lý do:', reason);
+  });
 
   // State
   let attendees = [];
@@ -314,20 +326,26 @@
     }
 
     btnStart.disabled = true;
-    showMessage(`Đang gửi yêu cầu kết nối tới @${channel.replace('@', '')}...`);
+    const cleanName = channel.replace(/^@/, '');
+    showMessage(`Đang gửi yêu cầu kết nối tới @${cleanName}...`);
+    console.log(`\n👉 [UI] Bấm bắt đầu điểm danh kênh: "${channel}", chế độ: "${mode}"`);
 
     try {
+      console.log(`📡 [HTTP] Gửi POST /api/start...`);
       const res = await fetch('/api/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ channel, mode, keyword })
       });
+      console.log(`📥 [HTTP] Phản hồi HTTP Status: ${res.status}`);
       const data = await res.json();
+      console.log(`📥 [HTTP] Dữ liệu nhận về:`, data);
       if (!data.success) {
         showMessage(data.message, true);
         btnStart.disabled = false;
       }
     } catch (err) {
+      console.error(`❌ [HTTP] Lỗi fetch /api/start:`, err);
       showMessage('Lỗi kết nối máy chủ backend: ' + err.message, true);
       btnStart.disabled = false;
     }
