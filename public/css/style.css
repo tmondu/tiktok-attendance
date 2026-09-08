@@ -683,14 +683,96 @@ body {
   color: var(--text-secondary);
 }
 
-/* Comment text preview */
-.comment-preview {
-  max-width: 280px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: #cbd5e1;
-  font-style: italic;
+/* ================= COMMENTS LIST IN TABLE ================= */
+.cmts-container {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-width: 420px;
+  max-height: 130px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+/* Scrollbar tinh gọn cho danh sách bình luận */
+.cmts-container::-webkit-scrollbar {
+  width: 4px;
+}
+.cmts-container::-webkit-scrollbar-track {
+  background: transparent;
+}
+.cmts-container::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+}
+.cmts-container::-webkit-scrollbar-thumb:hover {
+  background: rgba(37, 244, 238, 0.5);
+}
+
+.cmt-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 0.83rem;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-left: 2px solid var(--tiktok-cyan);
+  padding: 4px 8px;
+  border-radius: 6px;
+  line-height: 1.4;
+  transition: all 0.15s ease;
+}
+
+.cmt-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(37, 244, 238, 0.25);
+}
+
+.cmt-num {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--tiktok-cyan);
+  background: rgba(37, 244, 238, 0.12);
+  padding: 1px 5px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.cmt-text {
+  color: #e2e8f0;
+  word-break: break-word;
+  flex: 1;
+}
+
+.cmt-time {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  margin-left: 4px;
+  margin-top: 1px;
+}
+
+/* Thứ tự cmt: Lần 1, Lần 2 */
+.cmt-order-badge {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--tiktok-cyan);
+  background: rgba(37, 244, 238, 0.12);
+  border: 1px solid rgba(37, 244, 238, 0.25);
+  padding: 2px 7px;
+  border-radius: var(--radius-full);
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+/* Ô hiển thị nội dung bình luận từng dòng */
+.single-comment-cell {
+  color: #f1f5f9;
+  font-size: 0.88rem;
+  line-height: 1.45;
+  word-break: break-word;
 }
 
 .text-center { text-align: center; }

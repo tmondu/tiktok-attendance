@@ -13,7 +13,11 @@ export class TikTokService extends EventEmitter {
       caseSensitive: false
     };
     this.sessionStartTime = null;
-    this.attendanceMap = new Map();
+    this.attendanceMap = new Map(); // Lưu thông tin người dùng duy nhất và thống kê (uniqueId -> userStats)
+    this.userIdMap = new Map(); // Ánh xạ userId -> uniqueId để đồng bộ sự kiện thả tim khi TikTok không gửi uniqueId
+    this.records = []; // Lưu toàn bộ các dòng ghi nhận (mỗi cmt là 1 dòng riêng biệt)
+    this.processedMsgIds = new Set(); // Bộ nhớ chống trùng lặp tin nhắn theo ID của TikTok
+    this.recentComments = new Map(); // Bộ nhớ chống trùng lặp tin nhắn theo user + content (<1.5s)
     this.stats = {
       totalAttendees: 0,
       totalComments: 0,
@@ -21,6 +25,197 @@ export class TikTokService extends EventEmitter {
       totalGifts: 0,
       currentViewers: 0
     };
+  }
+
+  /**
+   * Trích xuất link avatar từ payload của TikTok
+   */
+  _extractAvatar(userData) {
+    if (!userData) return '';
+    return userData.profilePictureUrl ||
+      userData.avatarThumb?.urlList?.[0] ||
+      userData.avatarMedium?.urlList?.[0] ||
+      userData.avatarLarge?.urlList?.[0] ||
+      userData.user?.avatarThumb?.urlList?.[0] ||
+      userData.user?.avatarLarge?.urlList?.[0] ||
+      userData.user?.profilePictureUrl ||
+      userData.rawUser?.avatarThumb?.urlList?.[0] ||
+      userData.rawUser?.avatarLarge?.urlList?.[0] ||
+      '';
+  }
+
+  /**
+   * Trích xuất và chuẩn hóa thông tin người dùng từ mọi sự kiện TikTok
+   */
+  _resolveUser(data) {
+    if (!data) return null;
+
+    const rawUserId = data.userId || 
+                      data.rawUser?.idStr || 
+                      data.rawUser?.id || 
+                      data.user?.idStr || 
+                      data.user?.id || 
+                      data.user?.userId;
+    const strUserId = rawUserId ? String(rawUserId) : '';
+
+    let uniqueId = data.uniqueId || 
+                   data.displayId || 
+                   data.rawUser?.displayId || 
+                   data.rawUser?.uniqueId || 
+                   data.user?.uniqueId || 
+                   data.user?.displayId;
+
+    if (uniqueId) {
+      uniqueId = String(uniqueId).replace(/^@/, '').trim();
+    }
+
+    // Tra cứu từ userId nếu uniqueId chưa có
+    if (!uniqueId && strUserId && this.userIdMap.has(strUserId)) {
+      uniqueId = this.userIdMap.get(strUserId);
+    }
+
+    // Fallback: nếu vẫn chưa có uniqueId thì dùng strUserId hoặc nickname
+    if (!uniqueId) {
+      if (strUserId) {
+        uniqueId = `user_${strUserId}`;
+      } else if (data.nickname || data.user?.nickname) {
+        uniqueId = String(data.nickname || data.user?.nickname).toLowerCase().replace(/\s+/g, '_');
+      } else {
+        return null;
+      }
+    }
+
+    // Lưu vào mapping nếu có cả userId và uniqueId chuẩn
+    if (strUserId && uniqueId && !uniqueId.startsWith('user_')) {
+      this.userIdMap.set(strUserId, uniqueId);
+    }
+
+    const nickname = data.nickname || 
+                     data.rawUser?.nickname || 
+                     data.user?.nickname || 
+                     data.user?.nickName || 
+                     uniqueId;
+
+    const avatar = this._extractAvatar(data);
+
+    return { uniqueId, nickname, avatar, userId: strUserId };
+  }
+
+  /**
+   * Xử lý bình luận / emote / câu hỏi từ người xem và ghi vào danh sách
+   */
+  _handleChatMessage(data, comment, defaultMethod = 'Bình luận') {
+    const user = this._resolveUser(data);
+    if (!user) return;
+    const { uniqueId, nickname, avatar, userId } = user;
+
+    // --- CHỐNG GỬI LẶP TIN NHẮN (DEDUPLICATION) ---
+    const msgId = data.msgId ? String(data.msgId) : null;
+    const nowMs = Date.now();
+
+    if (msgId) {
+      if (this.processedMsgIds.has(msgId)) {
+        return; // Bỏ qua vì trùng msgId từ TikTok
+      }
+      this.processedMsgIds.add(msgId);
+      if (this.processedMsgIds.size > 5000) {
+        const oldest = this.processedMsgIds.values().next().value;
+        this.processedMsgIds.delete(oldest);
+      }
+    }
+
+    // Chống lặp cùng user + cùng nội dung cmt trong 1.5 giây
+    const recentKey = `${uniqueId}_${comment}`;
+    const lastSeen = this.recentComments.get(recentKey);
+    if (lastSeen && (nowMs - lastSeen) < 1500) {
+      return;
+    }
+    this.recentComments.set(recentKey, nowMs);
+    if (this.recentComments.size > 2000) {
+      const oldestKey = this.recentComments.keys().next().value;
+      this.recentComments.delete(oldestKey);
+    }
+
+    this.stats.totalComments++;
+
+    // In log ra terminal để người dùng dễ dàng theo dõi trực tiếp
+    console.log(`[TikTok LIVE] Bình luận từ @${uniqueId} (${nickname}): "${comment}"`);
+
+    let isValid = false;
+    let method = defaultMethod;
+    const mode = this.settings.mode;
+
+    if (mode === 'all' || mode === 'chat_all' || mode === 'chat_or_like') {
+      isValid = true;
+    } else if (mode === 'chat_keyword') {
+      const targetKw = this.settings.keyword.trim();
+      if (targetKw) {
+        const checkText = this.settings.caseSensitive ? comment : comment.toLowerCase();
+        const findText = this.settings.caseSensitive ? targetKw : targetKw.toLowerCase();
+        if (checkText.includes(findText)) {
+          isValid = true;
+          method = `Cú pháp: "${targetKw}"`;
+        }
+      }
+    } else if (mode === 'chat_and_like') {
+      isValid = true;
+    }
+
+    if (isValid) {
+      const now = new Date();
+      let userStats = this.attendanceMap.get(uniqueId);
+      if (!userStats && userId && this.userIdMap.has(userId)) {
+        userStats = this.attendanceMap.get(this.userIdMap.get(userId));
+      }
+
+      if (!userStats) {
+        userStats = {
+          userId,
+          uniqueId,
+          nickname,
+          avatar,
+          firstSeen: now,
+          lastActive: now,
+          commentCount: 1,
+          likeCount: 0,
+          giftCount: 0
+        };
+        this.attendanceMap.set(uniqueId, userStats);
+        this.stats.totalAttendees = this.attendanceMap.size;
+      } else {
+        userStats.commentCount = (userStats.commentCount || 0) + 1;
+        userStats.lastActive = now;
+        if (nickname && userStats.nickname === userStats.uniqueId) userStats.nickname = nickname;
+        if (avatar && !userStats.avatar) userStats.avatar = avatar;
+      }
+
+      // Tạo 1 dòng mới tinh cho lượt bình luận này
+      const record = {
+        id: `cmt_${Date.now()}_${this.records.length + 1}`,
+        uniqueId: userStats.uniqueId,
+        nickname: userStats.nickname,
+        avatar: userStats.avatar || avatar,
+        time: now,
+        checkinMethod: method,
+        comment,
+        commentIndex: userStats.commentCount, // Thứ tự cmt của user này (Lần 1, Lần 2...)
+        commentCount: userStats.commentCount,
+        likeCount: userStats.likeCount,
+        giftCount: userStats.giftCount
+      };
+
+      this.records.push(record);
+      this.emit('newRecord', record);
+
+      this.emit('chatMessage', {
+        uniqueId: userStats.uniqueId,
+        nickname: userStats.nickname,
+        comment,
+        avatar: record.avatar
+      });
+    }
+
+    this.emit('stats', this.stats);
   }
 
   /**
@@ -78,20 +273,18 @@ export class TikTokService extends EventEmitter {
         channel: this.channel,
         message: errMsg
       });
-      throw err;
+      throw new Error(errMsg);
     }
   }
 
   /**
-   * Ngắt kết nối phiên live hiện tại
+   * Dừng kết nối
    */
   async stop() {
     if (this.connection) {
       try {
         await this.connection.disconnect();
-      } catch (e) {
-        // bỏ qua lỗi disconnect nếu stream đã đóng
-      }
+      } catch (e) {}
       this.connection = null;
     }
     this.status = 'idle';
@@ -107,6 +300,10 @@ export class TikTokService extends EventEmitter {
    */
   reset() {
     this.attendanceMap.clear();
+    this.userIdMap.clear();
+    this.records = [];
+    this.processedMsgIds.clear();
+    this.recentComments.clear();
     this.stats = {
       totalAttendees: 0,
       totalComments: 0,
@@ -120,62 +317,6 @@ export class TikTokService extends EventEmitter {
   }
 
   /**
-   * Cập nhật hoặc ghi nhận thông tin điểm danh của 1 user
-   */
-  _recordAttendee(userData, checkinMethod, commentText = '', initialCounts = {}) {
-    const {
-      uniqueId,
-      nickname,
-      profilePictureUrl,
-      userId,
-      avatarThumb,
-      avatarMedium,
-      avatarLarge,
-      user
-    } = userData;
-
-    if (!uniqueId) return null;
-
-    // Lấy link avatar thực tế từ mọi trường TikTok trả về
-    const avatar = profilePictureUrl ||
-      avatarThumb?.urlList?.[0] ||
-      avatarMedium?.urlList?.[0] ||
-      avatarLarge?.urlList?.[0] ||
-      user?.avatarThumb?.urlList?.[0] ||
-      user?.avatarLarge?.urlList?.[0] ||
-      '';
-
-    const now = new Date();
-    let attendee = this.attendanceMap.get(uniqueId);
-
-    if (!attendee) {
-      attendee = {
-        userId: userId ? String(userId) : (user?.id ? String(user.id) : ''),
-        uniqueId,
-        nickname: nickname || user?.nickname || uniqueId,
-        avatar,
-        firstSeen: now,
-        lastActive: now,
-        checkinMethod,
-        lastComment: commentText,
-        commentCount: initialCounts.comments ?? (commentText ? 1 : 0),
-        likeCount: initialCounts.likes ?? 0,
-        giftCount: initialCounts.gifts ?? 0
-      };
-      this.attendanceMap.set(uniqueId, attendee);
-      this.stats.totalAttendees = this.attendanceMap.size;
-      this.emit('newAttendee', attendee);
-    } else {
-      attendee.lastActive = now;
-      if (nickname) attendee.nickname = nickname;
-      if (avatar) attendee.avatar = avatar;
-      if (commentText) attendee.lastComment = commentText;
-    }
-
-    return attendee;
-  }
-
-  /**
    * Thiết lập các event listener từ TikTok Webcast
    */
   _setupListeners() {
@@ -184,112 +325,177 @@ export class TikTokService extends EventEmitter {
     // 1. Sự kiện Người xem vào phòng Live (member / join)
     this.connection.on('member', (data) => {
       if (this.settings.mode === 'all' || this.settings.mode === 'join') {
-        this._recordAttendee(data, 'Vào xem LIVE');
+        const user = this._resolveUser(data);
+        if (!user) return;
+        const { uniqueId, nickname, avatar, userId } = user;
+
+        if (!this.attendanceMap.has(uniqueId)) {
+          const now = new Date();
+          const userStats = {
+            userId,
+            uniqueId,
+            nickname,
+            avatar,
+            firstSeen: now,
+            lastActive: now,
+            commentCount: 0,
+            likeCount: 0,
+            giftCount: 0
+          };
+          this.attendanceMap.set(uniqueId, userStats);
+          this.stats.totalAttendees = this.attendanceMap.size;
+
+          const record = {
+            id: `join_${Date.now()}_${this.records.length + 1}`,
+            uniqueId,
+            nickname: userStats.nickname,
+            avatar: userStats.avatar,
+            time: now,
+            checkinMethod: 'Vào xem LIVE',
+            comment: '',
+            commentIndex: null,
+            commentCount: 0,
+            likeCount: 0,
+            giftCount: 0
+          };
+          this.records.push(record);
+          this.emit('newRecord', record);
+        }
         this.emit('stats', this.stats);
       }
     });
 
-    // 2. Sự kiện Bình luận (chat)
+    // 2. Sự kiện Bình luận (chat, emote, questionNew) - Hỗ trợ mọi hình thức comment của người xem
     this.connection.on('chat', (data) => {
-      this.stats.totalComments++;
-      // TikTok protobuf v3 dùng trường content cho nội dung bình luận
       const comment = (
         data.content ||
         data.comment ||
         data.text ||
         data.displayText ||
+        data.message ||
+        data.common?.displayText?.defaultPattern ||
+        (Array.isArray(data.emotes) && data.emotes.length ? '[Nhãn dán/Emote]' : '') ||
         ''
-      ).trim();
+      ).toString().trim();
 
-      let isValid = false;
-      let method = 'Bình luận';
-
-      const mode = this.settings.mode;
-
-      if (mode === 'all' || mode === 'chat_all' || mode === 'chat_or_like') {
-        isValid = true;
-      } else if (mode === 'chat_keyword') {
-        const targetKw = this.settings.keyword.trim();
-        if (targetKw) {
-          const checkText = this.settings.caseSensitive ? comment : comment.toLowerCase();
-          const findText = this.settings.caseSensitive ? targetKw : targetKw.toLowerCase();
-          if (checkText.includes(findText)) {
-            isValid = true;
-            method = `Cú pháp: "${targetKw}"`;
-          }
-        }
-      } else if (mode === 'chat_and_like') {
-        isValid = true;
+      if (comment) {
+        this._handleChatMessage(data, comment, 'Bình luận');
       }
-
-      if (isValid) {
-        let attendee = this.attendanceMap.get(data.uniqueId);
-        if (!attendee) {
-          const initialMethod = mode === 'chat_and_like' ? 'Chưa thả tim' : method;
-          attendee = this._recordAttendee(data, initialMethod, comment, { comments: 1 });
-        } else {
-          attendee.lastActive = new Date();
-          attendee.lastComment = comment;
-          attendee.commentCount = (attendee.commentCount || 0) + 1;
-          if (mode === 'chat_and_like' && attendee.likeCount > 0) {
-            attendee.checkinMethod = 'Đủ Cmt & Tim (Hợp lệ)';
-          }
-          this.emit('attendeeUpdated', attendee);
-        }
-
-        this.emit('chatMessage', {
-          uniqueId: data.uniqueId,
-          nickname: data.nickname,
-          comment,
-          avatar: attendee?.avatar || data.profilePictureUrl
-        });
-      } else {
-        const existing = this.attendanceMap.get(data.uniqueId);
-        if (existing) {
-          existing.commentCount = (existing.commentCount || 0) + 1;
-          existing.lastActive = new Date();
-          existing.lastComment = comment;
-          this.emit('attendeeUpdated', existing);
-        }
-      }
-
-      this.emit('stats', this.stats);
     });
 
-    // 3. Sự kiện Thả tim (like)
-    this.connection.on('like', (data) => {
-      const addedLikes = data.likeCount || 1;
-      this.stats.totalLikes += addedLikes;
-      const mode = this.settings.mode;
+    // Bắt sự kiện người xem gửi Sticker / Emote
+    this.connection.on('emote', (data) => {
+      const comment = (
+        data.comment ||
+        data.content ||
+        data.text ||
+        (Array.isArray(data.emotes) && data.emotes.length ? '[Nhãn dán/Emote]' : '[Biểu tượng cảm xúc]')
+      ).toString().trim();
 
-      if (mode === 'all' || mode === 'chat_or_like' || mode === 'like_only') {
-        let attendee = this.attendanceMap.get(data.uniqueId);
-        if (!attendee) {
-          attendee = this._recordAttendee(data, 'Thả tim', '', { likes: addedLikes });
-        } else {
-          attendee.likeCount = (attendee.likeCount || 0) + addedLikes;
-          attendee.lastActive = new Date();
-          this.emit('attendeeUpdated', attendee);
-        }
-      } else if (mode === 'chat_and_like') {
-        let attendee = this.attendanceMap.get(data.uniqueId);
-        if (!attendee) {
-          attendee = this._recordAttendee(data, 'Chưa bình luận', '', { likes: addedLikes });
-        } else {
-          attendee.likeCount = (attendee.likeCount || 0) + addedLikes;
-          attendee.lastActive = new Date();
-          if (attendee.commentCount > 0) {
-            attendee.checkinMethod = 'Đủ Cmt & Tim (Hợp lệ)';
-          }
-          this.emit('attendeeUpdated', attendee);
+      if (comment) {
+        this._handleChatMessage(data, comment, 'Nhãn dán / Emote');
+      }
+    });
+
+    // Bắt sự kiện người xem đặt câu hỏi trong mục Q&A
+    this.connection.on('questionNew', (data) => {
+      const comment = (
+        data.text ||
+        data.questionText ||
+        data.details?.text ||
+        data.content ||
+        ''
+      ).toString().trim();
+
+      if (comment) {
+        this._handleChatMessage(data, comment, 'Hỏi đáp Q&A');
+      }
+    });
+
+    // 3. Sự kiện Thả tim (like) - Bắt mọi lượt tim, cập nhật tức thì vào bảng và thống kê
+    this.connection.on('like', (data) => {
+      if (!data) return;
+
+      const addedLikes = Math.max(1, Number(data.likeCount || data.count || data.likes || 1));
+
+      if (data.totalLikeCount) {
+        this.stats.totalLikes = Math.max(this.stats.totalLikes, Number(data.totalLikeCount));
+      } else if (data.total) {
+        this.stats.totalLikes = Math.max(this.stats.totalLikes, Number(data.total));
+      } else {
+        this.stats.totalLikes += addedLikes;
+      }
+
+      const user = this._resolveUser(data);
+      if (!user) {
+        // Vẫn cập nhật tổng tim phiên LIVE dù không lấy được người dùng
+        this.emit('stats', this.stats);
+        return;
+      }
+
+      const { uniqueId, nickname, avatar, userId } = user;
+      const mode = this.settings.mode;
+      const now = new Date();
+
+      let userStats = this.attendanceMap.get(uniqueId);
+      if (!userStats && userId && this.userIdMap.has(userId)) {
+        userStats = this.attendanceMap.get(this.userIdMap.get(userId));
+      }
+
+      if (!userStats) {
+        userStats = {
+          userId,
+          uniqueId,
+          nickname,
+          avatar,
+          firstSeen: now,
+          lastActive: now,
+          commentCount: 0,
+          likeCount: addedLikes,
+          giftCount: 0
+        };
+        this.attendanceMap.set(uniqueId, userStats);
+        this.stats.totalAttendees = this.attendanceMap.size;
+
+        if (mode === 'chat_or_like' || mode === 'like_only' || mode === 'all') {
+          const record = {
+            id: `like_${Date.now()}_${this.records.length + 1}`,
+            uniqueId: userStats.uniqueId,
+            nickname: userStats.nickname,
+            avatar: userStats.avatar,
+            time: now,
+            checkinMethod: 'Thả tim LIVE',
+            comment: '',
+            commentIndex: null,
+            commentCount: 0,
+            likeCount: userStats.likeCount,
+            giftCount: 0
+          };
+          this.records.push(record);
+          this.emit('newRecord', record);
         }
       } else {
-        const existing = this.attendanceMap.get(data.uniqueId);
-        if (existing) {
-          existing.likeCount = (existing.likeCount || 0) + addedLikes;
-          existing.lastActive = new Date();
-          this.emit('attendeeUpdated', existing);
+        userStats.likeCount = (userStats.likeCount || 0) + addedLikes;
+        userStats.lastActive = now;
+        if (nickname && userStats.nickname === userStats.uniqueId) userStats.nickname = nickname;
+        if (avatar && !userStats.avatar) userStats.avatar = avatar;
+
+        // Cập nhật lượt tim vào tất cả các dòng đã lưu của người này trong this.records
+        for (let i = this.records.length - 1; i >= 0; i--) {
+          if (this.records[i].uniqueId === userStats.uniqueId) {
+            this.records[i].likeCount = userStats.likeCount;
+            if (mode === 'chat_and_like' && userStats.commentCount > 0) {
+              this.records[i].checkinMethod = 'Đủ Cmt & Tim (Hợp lệ)';
+            }
+          }
         }
+
+        // Phát sự kiện cập nhật thời gian thực số tim trên giao diện
+        this.emit('userLikesUpdated', {
+          uniqueId: userStats.uniqueId,
+          likeCount: userStats.likeCount,
+          checkinMethod: mode === 'chat_and_like' && userStats.commentCount > 0 ? 'Đủ Cmt & Tim (Hợp lệ)' : null
+        });
       }
 
       this.emit('stats', this.stats);
@@ -298,15 +504,32 @@ export class TikTokService extends EventEmitter {
     // 4. Sự kiện Tặng quà (gift)
     this.connection.on('gift', (data) => {
       this.stats.totalGifts++;
-      if (this.settings.mode === 'all') {
-        this._recordAttendee(data, `Tặng ${data.giftName || 'quà'}`);
+      const user = this._resolveUser(data);
+      const uniqueId = user ? user.uniqueId : (data.uniqueId || '');
+      let userStats = uniqueId ? this.attendanceMap.get(uniqueId) : null;
+
+      if (userStats) {
+        userStats.giftCount = (userStats.giftCount || 0) + (data.repeatCount || 1);
+        userStats.lastActive = new Date();
       }
 
-      const existing = this.attendanceMap.get(data.uniqueId);
-      if (existing) {
-        existing.giftCount = (existing.giftCount || 0) + (data.repeatCount || 1);
-        existing.lastActive = new Date();
-        this.emit('attendeeUpdated', existing);
+      if (this.settings.mode === 'all' && user) {
+        const now = new Date();
+        const record = {
+          id: `gift_${Date.now()}_${this.records.length + 1}`,
+          uniqueId: user.uniqueId,
+          nickname: user.nickname,
+          avatar: user.avatar,
+          time: now,
+          checkinMethod: `Tặng ${data.giftName || 'quà'}`,
+          comment: `[Quà: ${data.giftName || 'Gift'} x${data.repeatCount || 1}]`,
+          commentIndex: null,
+          commentCount: userStats?.commentCount || 0,
+          likeCount: userStats?.likeCount || 0,
+          giftCount: (userStats?.giftCount || 0) + (data.repeatCount || 1)
+        };
+        this.records.push(record);
+        this.emit('newRecord', record);
       }
 
       this.emit('stats', this.stats);
@@ -354,10 +577,10 @@ export class TikTokService extends EventEmitter {
   }
 
   /**
-   * Lấy danh sách toàn bộ người đã điểm danh (mảng)
+   * Lấy danh sách toàn bộ dòng điểm danh (mỗi bình luận là 1 dòng riêng)
    */
   getAttendanceList() {
-    return Array.from(this.attendanceMap.values());
+    return this.records;
   }
 
   /**
@@ -386,33 +609,64 @@ export class TikTokService extends EventEmitter {
   }
 
   /**
-   * Thêm dữ liệu mẫu (Dành cho việc kiểm tra giao diện và kiểm thử)
+   * Thêm dữ liệu mẫu (mỗi bình luận hiển thị thành 1 dòng riêng biệt)
    */
   addMockData(count = 5) {
-    const mockNames = [
-      { u: 'nguyenvana_99', n: 'Nguyễn Văn An', c: 'Có mặt điểm danh ạ' },
+    const mockComments = [
+      { u: 'nguyenvana_99', n: 'Nguyễn Văn An', c: 'Em chào thầy ạ!' },
       { u: 'tranthib_2k', n: 'Trần Thị Bích', c: 'Em chào thầy/cô! MSHV: 20261101' },
-      { u: 'lehoang_dev', n: 'Lê Hoàng Nam', c: 'Chào cả lớp' },
+      { u: 'nguyenvana_99', n: 'Nguyễn Văn An', c: 'Có mặt điểm danh ạ! MSV: 20260101' },
+      { u: 'lehoang_dev', n: 'Lê Hoàng Nam', c: 'Chào cả lớp, hôm nay học bài nào vậy mọi người?' },
+      { u: 'tranthib_2k', n: 'Trần Thị Bích', c: 'Em đã thả 20 tim rồi ạ' },
       { u: 'phamthu_hang', n: 'Phạm Thu Hằng', c: 'Có mặt ạ!' },
-      { u: 'vu_minhtuan', n: 'Vũ Minh Tuấn', c: 'MS: TT9876' }
+      { u: 'vu_minhtuan', n: 'Vũ Minh Tuấn', c: 'MS: TT9876' },
+      { u: 'vu_minhtuan', n: 'Vũ Minh Tuấn', c: 'Thầy cho em xin tài liệu buổi trước với ạ' }
     ];
 
-    for (let i = 0; i < Math.min(count, mockNames.length); i++) {
-      const item = mockNames[i];
-      const attendee = this._recordAttendee(
-        {
+    const limit = Math.min(count * 2, mockComments.length);
+    for (let i = 0; i < limit; i++) {
+      const item = mockComments[i];
+      const now = new Date(Date.now() - (limit - i) * 20000);
+      let userStats = this.attendanceMap.get(item.u);
+
+      if (!userStats) {
+        userStats = {
           uniqueId: item.u,
           nickname: item.n,
-          profilePictureUrl: `https://api.dicebear.com/7.x/bottts/svg?seed=${item.u}`
-        },
-        'Bình luận điểm danh',
-        item.c
-      );
-      if (attendee) {
-        attendee.commentCount = Math.floor(Math.random() * 5) + 1;
-        attendee.likeCount = Math.floor(Math.random() * 20) + 1;
+          avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${item.u}`,
+          firstSeen: now,
+          lastActive: now,
+          commentCount: 1,
+          likeCount: Math.floor(Math.random() * 10) + 1,
+          giftCount: 0
+        };
+        this.attendanceMap.set(item.u, userStats);
+      } else {
+        userStats.commentCount++;
+        userStats.lastActive = now;
       }
+
+      const record = {
+        id: `mock_${Date.now()}_${i + 1}`,
+        uniqueId: item.u,
+        nickname: item.n,
+        avatar: userStats.avatar,
+        time: now,
+        checkinMethod: 'Bình luận điểm danh',
+        comment: item.c,
+        commentIndex: userStats.commentCount, // Lần 1, Lần 2 của user này
+        commentCount: userStats.commentCount,
+        likeCount: userStats.likeCount,
+        giftCount: userStats.giftCount
+      };
+
+      this.records.push(record);
+      this.stats.totalComments++;
+      this.stats.totalLikes += record.likeCount;
+      this.emit('newRecord', record);
     }
+
+    this.stats.totalAttendees = this.attendanceMap.size;
     this.emit('stats', this.stats);
   }
 }

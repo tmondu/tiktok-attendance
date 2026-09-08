@@ -39,5 +39,29 @@ if (fs.existsSync(legacyPath)) {
     console.log('[Patch] Fixed emoteList in tiktok-live-connector');
   }
 
+  // Fix 4: Preserve user attributes in WebcastLikeMessage / Webcast messages where displayId might be missing or numeric id
+  if (content.includes('uniqueId: webcastUser.displayId !== "" ? webcastUser.displayId : void 0,')) {
+    content = content.replace(
+      'userId: webcastUser.idStr?.toString(),',
+      'userId: (webcastUser.idStr || webcastUser.id)?.toString(),'
+    ).replace(
+      'uniqueId: webcastUser.displayId !== "" ? webcastUser.displayId : void 0,',
+      'uniqueId: (webcastUser.displayId && webcastUser.displayId !== "") ? webcastUser.displayId : (webcastUser.uniqueId || (webcastUser.idStr || webcastUser.id)?.toString() || void 0),'
+    ).replace(
+      'nickname: webcastUser.nickname !== "" ? webcastUser.nickname : void 0,',
+      'nickname: (webcastUser.nickname && webcastUser.nickname !== "") ? webcastUser.nickname : (webcastUser.displayId || webcastUser.uniqueId || "Người xem"),'
+    );
+    console.log('[Patch] Fixed getUserAttributes in tiktok-live-connector');
+  }
+
+  // Fix 5: Keep rawUser reference instead of deleting originalObject.user completely
+  if (content.includes('delete webcastObject.user;\n\t\treturn webcastObject;')) {
+    content = content.replace(
+      'delete webcastObject.user;\n\t\treturn webcastObject;',
+      'webcastObject.rawUser = webcastObject.user;\n\t\treturn webcastObject;'
+    );
+    console.log('[Patch] Preserved rawUser in simplifyObject');
+  }
+
   fs.writeFileSync(legacyPath, content, 'utf8');
 }

@@ -7,8 +7,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node src/server.js",
-    "build:bundle": "esbuild src/server.js --bundle --platform=node --target=node22 --format=cjs --outfile=dist/app.cjs",
-    "build:exe": "npm run build:bundle && npx -y @yao-pkg/pkg dist/app.cjs --targets node22-win-x64 --output bin/tiktok-attendance.exe && cp -r public bin/",
+    "build:bundle": "node scripts/generate-embedded-assets.js && esbuild src/server.js --bundle --platform=node --target=node22 --format=cjs --outfile=dist/app.cjs",
+    "build:exe": "npm run build:bundle && npx -y @yao-pkg/pkg dist/app.cjs -c package.json --targets node22-win-x64 --output bin/tiktok-attendance.exe && node -e \"if(fs.existsSync('public')) fs.cpSync('public', 'bin/public', {recursive: true})\"",
     "postinstall": "node scripts/patch-tiktok.js"
   },
   "pkg": {

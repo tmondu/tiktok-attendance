@@ -56,8 +56,8 @@ export async function generateExcelReport(attendanceList, sessionInfo = {}) {
 
   const metaRows = [
     ['Kênh TikTok LIVE:', `@${channel.replace('@', '')}`, '', 'Bắt đầu điểm danh:', formatTime(startTime)],
-    ['Tổng người điểm danh:', attendanceList.length, '', 'Kết thúc:', formatTime(endTime)],
-    ['Chế độ điểm danh:', modeText + (keyword ? ` (Từ khóa: "${keyword}")` : ''), '', 'Tổng lượt tương tác:', `Bình luận: ${totalComments} | Tim: ${totalLikes}`]
+    ['Tổng người tham gia:', sessionInfo?.stats?.totalAttendees ?? attendanceList.length, '', 'Tổng lượt ghi nhận:', `${attendanceList.length} dòng`],
+    ['Chế độ điểm danh:', modeText + (keyword ? ` (Từ khóa: "${keyword}")` : ''), '', 'Tổng tương tác:', `Bình luận: ${totalComments} | Tim: ${totalLikes}`]
   ];
 
   metaRows.forEach((rowValues) => {
@@ -75,13 +75,12 @@ export async function generateExcelReport(attendanceList, sessionInfo = {}) {
     { header: 'STT', key: 'stt', width: 8, align: 'center' },
     { header: 'Username (@ID)', key: 'uniqueId', width: 22, align: 'left' },
     { header: 'Tên hiển thị', key: 'nickname', width: 26, align: 'left' },
-    { header: 'Giờ vào xem', key: 'firstSeen', width: 20, align: 'center' },
-    { header: 'Tương tác cuối', key: 'lastActive', width: 20, align: 'center' },
-    { header: 'Hình thức điểm danh', key: 'checkinMethod', width: 22, align: 'center' },
-    { header: 'Nội dung bình luận / Cú pháp', key: 'lastComment', width: 35, align: 'left' },
-    { header: 'Số bình luận', key: 'commentCount', width: 14, align: 'right' },
-    { header: 'Số tim', key: 'likeCount', width: 12, align: 'right' },
-    { header: 'Quà tặng', key: 'giftCount', width: 12, align: 'right' }
+    { header: 'Thời gian', key: 'time', width: 20, align: 'center' },
+    { header: 'Hình thức', key: 'checkinMethod', width: 22, align: 'center' },
+    { header: 'Lần cmt', key: 'commentIndex', width: 12, align: 'center' },
+    { header: 'Nội dung bình luận / Cú pháp', key: 'comment', width: 45, align: 'left' },
+    { header: 'Tổng cmt (User)', key: 'commentCount', width: 16, align: 'right' },
+    { header: 'Số tim (User)', key: 'likeCount', width: 14, align: 'right' }
   ];
 
   const headerRow = worksheet.addRow(headers.map(h => h.header));
@@ -105,20 +104,20 @@ export async function generateExcelReport(attendanceList, sessionInfo = {}) {
 
   // 4. Populate Data Rows
   attendanceList.forEach((item, index) => {
+    const commentText = item.comment || item.lastComment || '';
     const row = worksheet.addRow([
       index + 1,
       `@${item.uniqueId}`,
       item.nickname || item.uniqueId,
-      formatTime(item.firstSeen),
-      formatTime(item.lastActive || item.firstSeen),
-      item.checkinMethod || 'Tham gia live',
-      item.lastComment || '',
+      formatTime(item.time || item.firstSeen),
+      item.checkinMethod || 'Bình luận',
+      item.commentIndex ? `Lần ${item.commentIndex}` : '—',
+      commentText,
       item.commentCount || 0,
-      item.likeCount || 0,
-      item.giftCount || 0
+      item.likeCount || 0
     ]);
 
-    row.height = 22;
+    row.height = 24;
     const isEven = index % 2 === 0;
 
     row.eachCell((cell, colNumber) => {
@@ -126,7 +125,8 @@ export async function generateExcelReport(attendanceList, sessionInfo = {}) {
       cell.font = { name: 'Segoe UI', size: 10 };
       cell.alignment = {
         vertical: 'middle',
-        horizontal: colConfig ? colConfig.align : 'left'
+        horizontal: colConfig ? colConfig.align : 'left',
+        wrapText: colConfig ? colConfig.key === 'comment' : false
       };
 
       // Zebra background
@@ -148,15 +148,14 @@ export async function generateExcelReport(attendanceList, sessionInfo = {}) {
   // 5. Total Summary Row
   const summaryRow = worksheet.addRow([
     'TỔNG',
-    `Tổng: ${attendanceList.length} người`,
+    `Tổng dòng: ${attendanceList.length}`,
     '',
     '',
     '',
     '',
     '',
-    attendanceList.reduce((acc, cur) => acc + (cur.commentCount || 0), 0),
-    attendanceList.reduce((acc, cur) => acc + (cur.likeCount || 0), 0),
-    attendanceList.reduce((acc, cur) => acc + (cur.giftCount || 0), 0)
+    totalComments,
+    totalLikes
   ]);
   summaryRow.height = 24;
   summaryRow.font = { name: 'Segoe UI', size: 10, bold: true };

@@ -9,6 +9,7 @@ import { TikTokService } from './tiktokService.js';
 import { generateExcelReport } from './excelExporter.js';
 
 import { existsSync } from 'fs';
+import { embeddedAssets } from './embeddedAssets.js';
 
 // Tương thích cả khi chạy qua ESM lẫn khi bundle CJS
 let baseDir = process.cwd();
@@ -22,13 +23,16 @@ try {
   baseDir = process.cwd();
 }
 
-let publicPath = path.join(baseDir, '..', 'public');
-if (!existsSync(publicPath)) {
-  publicPath = path.join(process.cwd(), 'public');
-}
-if (!existsSync(publicPath)) {
-  publicPath = path.join(baseDir, 'public');
-}
+const exeDir = path.dirname(process.execPath);
+const possiblePaths = [
+  path.join(process.cwd(), 'public'),
+  path.join(exeDir, 'public'),
+  path.join(exeDir, '..', 'public'),
+  path.join(baseDir, '..', 'public'),
+  path.join(baseDir, 'public')
+];
+
+let publicPath = possiblePaths.find((p) => existsSync(path.join(p, 'index.html')));
 
 const app = express();
 const httpServer = createServer(app);
@@ -42,7 +46,21 @@ const tiktokService = new TikTokService();
 // Middlewares
 app.use(cors());
 app.use(express.json());
-app.use(express.static(publicPath));
+
+if (publicPath) {
+  app.use(express.static(publicPath));
+}
+
+// Fallback phục vụ giao diện từ assets nhúng sẵn (đảm bảo file .exe chạy độc lập không cần thư mục public kèm theo)
+app.get(['/', '/index.html'], (req, res) => {
+  res.type('html').send(embeddedAssets.indexHtml);
+});
+app.get('/css/style.css', (req, res) => {
+  res.type('text/css').send(embeddedAssets.styleCss);
+});
+app.get('/js/app.js', (req, res) => {
+  res.type('application/javascript').send(embeddedAssets.appJs);
+});
 
 // Socket.IO Events
 io.on('connection', (socket) => {
@@ -68,8 +86,8 @@ io.on('connection', (socket) => {
 // Chuyển tiếp sự kiện từ TikTokService sang Socket.IO
 tiktokService.on('status', (data) => io.emit('status', data));
 tiktokService.on('stats', (stats) => io.emit('stats', stats));
-tiktokService.on('newAttendee', (attendee) => io.emit('newAttendee', attendee));
-tiktokService.on('attendeeUpdated', (attendee) => io.emit('attendeeUpdated', attendee));
+tiktokService.on('newRecord', (record) => io.emit('newRecord', record));
+tiktokService.on('userLikesUpdated', (data) => io.emit('userLikesUpdated', data));
 tiktokService.on('chatMessage', (msg) => io.emit('chatMessage', msg));
 tiktokService.on('reset', () => io.emit('reset'));
 
@@ -181,6 +199,14 @@ function startServer(portToTry) {
     }
   });
 }
+
+// Xử lý lỗi toàn cục tránh tắt ứng dụng đột ngột
+process.on('uncaughtException', (err) => {
+  console.error('\n❌ Lỗi hệ thống:', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('\n⚠️ Lỗi bất đồng bộ chưa được xử lý:', reason);
+});
 
 // Khởi động server
 startServer(Number(PORT));

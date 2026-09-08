@@ -113,16 +113,17 @@
       ? attendees.filter(a =>
           (a.uniqueId && a.uniqueId.toLowerCase().includes(filter)) ||
           (a.nickname && a.nickname.toLowerCase().includes(filter)) ||
+          (a.comment && a.comment.toLowerCase().includes(filter)) ||
           (a.lastComment && a.lastComment.toLowerCase().includes(filter))
         )
       : attendees;
 
-    tableCountBadge.textContent = `${filtered.length} người${filter ? ` (Lọc từ ${attendees.length})` : ''}`;
+    tableCountBadge.textContent = `${filtered.length} dòng${filter ? ` (Lọc từ ${attendees.length})` : ''}`;
 
     if (filtered.length === 0) {
       attendanceTbody.innerHTML = `
         <tr class="empty-row">
-          <td colspan="7">
+          <td colspan="6">
             <div class="empty-state">
               <div class="empty-icon">${filter ? '🔍' : '📋'}</div>
               <h3>${filter ? 'Không tìm thấy kết quả phù hợp' : 'Chưa có dữ liệu điểm danh'}</h3>
@@ -133,20 +134,23 @@
       return;
     }
 
-    // Hiển thị tối đa 200 dòng gần nhất trên UI để giữ giao diện siêu mượt (toàn bộ dữ liệu vẫn xuất Excel đầy đủ)
-    const displayList = filtered.slice(-200).reverse();
+    // Hiển thị tối đa 300 dòng gần nhất trên UI để giữ giao diện siêu mượt (toàn bộ dữ liệu vẫn xuất Excel đầy đủ)
+    const displayList = filtered.slice(-300).reverse();
 
     const fragment = document.createDocumentFragment();
     displayList.forEach((item, index) => {
       const tr = document.createElement('tr');
       const avatarUrl = item.avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${item.uniqueId}`;
 
-      let methodClass = 'join';
+      let methodClass = 'chat';
       if (item.checkinMethod && item.checkinMethod.includes('Cú pháp')) methodClass = 'keyword';
       else if (item.checkinMethod && item.checkinMethod.includes('Đủ Cmt & Tim')) methodClass = 'both';
-      else if (item.checkinMethod && item.checkinMethod.includes('Chưa')) methodClass = 'pending';
+      else if (item.checkinMethod && item.checkinMethod.includes('Vào xem')) methodClass = 'join';
       else if (item.checkinMethod && item.checkinMethod.includes('Thả tim')) methodClass = 'like';
-      else if (item.checkinMethod && item.checkinMethod.includes('Bình luận')) methodClass = 'chat';
+      else if (item.checkinMethod && item.checkinMethod.includes('Tặng')) methodClass = 'like';
+
+      const commentText = item.comment || item.lastComment || '';
+      const orderBadge = item.commentIndex ? `<span class="cmt-order-badge" title="Lượt bình luận thứ ${item.commentIndex} của người này">Lần ${item.commentIndex}</span>` : '';
 
       tr.innerHTML = `
         <td class="text-center" style="color: var(--text-muted); font-size: 0.82rem;">${index + 1}</td>
@@ -159,14 +163,20 @@
             </div>
           </div>
         </td>
-        <td class="text-center" style="color: var(--text-secondary); font-size: 0.85rem;">${formatTime(item.firstSeen)}</td>
-        <td class="text-center" style="color: var(--text-secondary); font-size: 0.85rem;">${formatTime(item.lastActive)}</td>
-        <td><span class="method-tag ${methodClass}">${escapeHtml(item.checkinMethod || 'Tham gia')}</span></td>
-        <td><div class="comment-preview" title="${escapeHtml(item.lastComment || '')}">${escapeHtml(item.lastComment || '—')}</div></td>
+        <td class="text-center" style="color: var(--text-secondary); font-size: 0.85rem;">${formatTime(item.time || item.firstSeen)}</td>
+        <td>
+          <span class="method-tag ${methodClass}">${escapeHtml(item.checkinMethod || 'Bình luận')}</span>
+          ${orderBadge}
+        </td>
+        <td>
+          <div class="single-comment-cell" title="${escapeHtml(commentText)}">
+            ${commentText ? escapeHtml(commentText) : '<span style="color: var(--text-muted); font-style: italic;">—</span>'}
+          </div>
+        </td>
         <td class="text-center">
           <div class="interaction-badges">
-            <span class="badge-pill" title="Lượt bình luận">💬 ${item.commentCount || 0}</span>
-            <span class="badge-pill" title="Lượt thả tim">❤️ ${item.likeCount || 0}</span>
+            <span class="badge-pill" title="Tổng bình luận của người này">💬 ${item.commentCount || 0}</span>
+            <span class="badge-pill" title="Tổng tim của người này">❤️ ${item.likeCount || 0}</span>
           </div>
         </td>
       `;
@@ -180,7 +190,7 @@
   function scheduleRender() {
     if (ecoMode) return; // Nếu bật Eco mode, tạm hoãn render liên tục
     if (!pendingRenderTimeout) {
-      pendingRenderTimeout = setTimeout(renderTable, 250);
+      pendingRenderTimeout = setTimeout(renderTable, 200);
     }
   }
 
@@ -215,18 +225,49 @@
     updateStatsUI(stats);
   });
 
-  socket.on('newAttendee', (attendee) => {
-    attendees.push(attendee);
-    updateStatsUI({ totalAttendees: attendees.length });
-    scheduleRender();
-  });
-
-  socket.on('attendeeUpdated', (updated) => {
-    const idx = attendees.findIndex(a => a.uniqueId === updated.uniqueId);
-    if (idx !== -1) {
-      attendees[idx] = updated;
+  socket.on('newRecord', (record) => {
+    if (!attendees.some(a => a.id && a.id === record.id)) {
+      attendees.push(record);
       scheduleRender();
     }
+  });
+
+  socket.on('userLikesUpdated', (data) => {
+    let changed = false;
+    const targetId = (data.uniqueId || '').replace(/^@/, '').toLowerCase().trim();
+
+    attendees.forEach((item) => {
+      const itemId = (item.uniqueId || '').replace(/^@/, '').toLowerCase().trim();
+      if (itemId === targetId) {
+        item.likeCount = data.likeCount;
+        if (data.checkinMethod) item.checkinMethod = data.checkinMethod;
+        changed = true;
+      }
+    });
+
+    // Cập nhật trực tiếp số tim vào các dòng đang hiển thị trên màn hình
+    const rows = attendanceTbody.querySelectorAll('tr');
+    rows.forEach((tr) => {
+      const handleEl = tr.querySelector('.user-handle');
+      if (handleEl) {
+        const rowId = handleEl.textContent.replace(/^@/, '').toLowerCase().trim();
+        if (rowId === targetId) {
+          const badges = tr.querySelectorAll('.interaction-badges .badge-pill');
+          if (badges.length >= 2) {
+            badges[1].textContent = `❤️ ${data.likeCount || 0}`;
+          }
+          if (data.checkinMethod) {
+            const tagEl = tr.querySelector('.method-tag');
+            if (tagEl) {
+              tagEl.textContent = data.checkinMethod;
+              tagEl.className = 'method-tag both';
+            }
+          }
+        }
+      }
+    });
+
+    if (changed) scheduleRender();
   });
 
   socket.on('reset', () => {
