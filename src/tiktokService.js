@@ -178,13 +178,15 @@ export class TikTokService extends EventEmitter {
           lastActive: now,
           commentCount: 1,
           likeCount: 0,
-          giftCount: 0
+          giftCount: 0,
+          lastComment: comment
         };
         this.attendanceMap.set(uniqueId, userStats);
         this.stats.totalAttendees = this.attendanceMap.size;
       } else {
         userStats.commentCount = (userStats.commentCount || 0) + 1;
         userStats.lastActive = now;
+        userStats.lastComment = comment;
         if (nickname && userStats.nickname === userStats.uniqueId) userStats.nickname = nickname;
         if (avatar && !userStats.avatar) userStats.avatar = avatar;
       }
@@ -635,6 +637,13 @@ export class TikTokService extends EventEmitter {
   }
 
   /**
+   * Lấy danh sách tổng hợp tương tác của từng người dùng duy nhất
+   */
+  getUserSummaryList() {
+    return Array.from(this.attendanceMap.values());
+  }
+
+  /**
    * Lấy thông tin phiên làm việc
    */
   getSessionInfo() {
@@ -689,12 +698,14 @@ export class TikTokService extends EventEmitter {
           lastActive: now,
           commentCount: 1,
           likeCount: Math.floor(Math.random() * 10) + 1,
-          giftCount: 0
+          giftCount: 0,
+          lastComment: item.c
         };
         this.attendanceMap.set(item.u, userStats);
       } else {
         userStats.commentCount++;
         userStats.lastActive = now;
+        userStats.lastComment = item.c;
       }
 
       const record = {

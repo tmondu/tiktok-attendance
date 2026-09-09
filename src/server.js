@@ -192,8 +192,9 @@ app.get('/api/export', async (req, res) => {
   try {
     const attendees = tiktokService.getAttendanceList();
     const sessionInfo = tiktokService.getSessionInfo();
+    const userSummary = tiktokService.getUserSummaryList ? tiktokService.getUserSummaryList() : [];
 
-    const buffer = await generateExcelReport(attendees, sessionInfo);
+    const buffer = await generateExcelReport(attendees, sessionInfo, userSummary);
 
     const dateStr = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
     const channelName = tiktokService.channel || 'tiktok_live';
