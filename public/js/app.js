@@ -168,7 +168,7 @@
         <td class="text-center" style="color: var(--text-muted); font-size: 0.82rem;">${index + 1}</td>
         <td>
           <div class="user-cell">
-            <img class="user-avatar" src="${avatarUrl}" alt="${item.nickname || item.uniqueId}" onerror="this.src='https://api.dicebear.com/7.x/bottts/svg?seed=${item.uniqueId}'">
+            <img class="user-avatar" src="${avatarUrl}" referrerpolicy="no-referrer" alt="${item.nickname || item.uniqueId}" onerror="this.src='https://api.dicebear.com/7.x/bottts/svg?seed=${item.uniqueId}'">
             <div class="user-info">
               <span class="user-name">${escapeHtml(item.nickname || item.uniqueId)}</span>
               <span class="user-handle">@${escapeHtml(item.uniqueId)}</span>

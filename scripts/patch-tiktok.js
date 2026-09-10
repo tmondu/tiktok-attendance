@@ -55,12 +55,30 @@ if (fs.existsSync(legacyPath)) {
   }
 
   // Fix 5: Keep rawUser reference instead of deleting originalObject.user completely
-  if (content.includes('delete webcastObject.user;\n\t\treturn webcastObject;')) {
+  if (content.includes('delete webcastObject.user;')) {
     content = content.replace(
-      'delete webcastObject.user;\n\t\treturn webcastObject;',
-      'webcastObject.rawUser = webcastObject.user;\n\t\treturn webcastObject;'
+      'delete webcastObject.user;',
+      'webcastObject.rawUser = webcastObject.user;'
     );
     console.log('[Patch] Preserved rawUser in simplifyObject');
+  }
+
+  // Fix 6: Fix avatar profilePictureUrl to use avatarThumb / avatarMedium / avatarLarge urlList
+  if (content.includes('profilePictureUrl: getPreferredPictureFormat(webcastUser.avatarLarge),')) {
+    content = content.replace(
+      'profilePictureUrl: getPreferredPictureFormat(webcastUser.avatarLarge),',
+      'profilePictureUrl: getPreferredPictureFormat(webcastUser.avatarThumb?.urlList || webcastUser.avatarMedium?.urlList || webcastUser.avatarLarge?.urlList || webcastUser.avatarThumb || webcastUser.avatarLarge),'
+    );
+    console.log('[Patch] Fixed profilePictureUrl in getUserAttributes');
+  }
+
+  // Fix 7: Support object with urlList in getPreferredPictureFormat
+  if (content.includes('function getPreferredPictureFormat(pictureUrls) {')) {
+    content = content.replace(
+      'function getPreferredPictureFormat(pictureUrls) {',
+      'function getPreferredPictureFormat(pictureUrls) {\n\tif (pictureUrls && !Array.isArray(pictureUrls) && Array.isArray(pictureUrls.urlList)) pictureUrls = pictureUrls.urlList;'
+    );
+    console.log('[Patch] Fixed getPreferredPictureFormat');
   }
 
   fs.writeFileSync(legacyPath, content, 'utf8');

@@ -32,15 +32,25 @@ export class TikTokService extends EventEmitter {
    */
   _extractAvatar(userData) {
     if (!userData) return '';
+    const getFirstUrl = (obj) => {
+      if (!obj) return '';
+      if (typeof obj === 'string') return obj;
+      if (Array.isArray(obj)) return obj[0] || '';
+      if (Array.isArray(obj.urlList)) return obj.urlList[0] || '';
+      return '';
+    };
+
     return userData.profilePictureUrl ||
-      userData.avatarThumb?.urlList?.[0] ||
-      userData.avatarMedium?.urlList?.[0] ||
-      userData.avatarLarge?.urlList?.[0] ||
-      userData.user?.avatarThumb?.urlList?.[0] ||
-      userData.user?.avatarLarge?.urlList?.[0] ||
+      getFirstUrl(userData.avatarThumb) ||
+      getFirstUrl(userData.avatarMedium) ||
+      getFirstUrl(userData.avatarLarge) ||
+      getFirstUrl(userData.user?.avatarThumb) ||
+      getFirstUrl(userData.user?.avatarMedium) ||
+      getFirstUrl(userData.user?.avatarLarge) ||
       userData.user?.profilePictureUrl ||
-      userData.rawUser?.avatarThumb?.urlList?.[0] ||
-      userData.rawUser?.avatarLarge?.urlList?.[0] ||
+      getFirstUrl(userData.rawUser?.avatarThumb) ||
+      getFirstUrl(userData.rawUser?.avatarMedium) ||
+      getFirstUrl(userData.rawUser?.avatarLarge) ||
       '';
   }
 
