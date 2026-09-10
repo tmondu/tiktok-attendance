@@ -221,6 +221,64 @@ export class TikTokService extends EventEmitter {
   }
 
   /**
+   * Tự động lấy cookie ttwid từ máy chủ TikTok để vượt qua xác thực handshake WebSocket
+   */
+  async _fetchTtwidCookie() {
+    const endpoints = [
+      'https://www.tiktok.com/live',
+      'https://www.tiktok.com/@tiktok/live',
+      'https://www.tiktok.com/'
+    ];
+
+    for (const url of endpoints) {
+      try {
+        const res = await fetch(url, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+            'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7'
+          },
+          signal: AbortSignal.timeout(6000)
+        });
+        const cookies = res.headers.getSetCookie ? res.headers.getSetCookie() : [res.headers.get('set-cookie')];
+        const ttwid = cookies.find(c => c && c.includes('ttwid='));
+        if (ttwid) {
+          return ttwid;
+        }
+      } catch (e) {
+        // Thử endpoint tiếp theo
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Thiết lập cookie ttwid và bảo vệ không cho sign-server ghi đè cookie rỗng
+   */
+  async _ensureValidTtwidCookie() {
+    if (!this.connection?.webClient?.cookieJar) return;
+
+    try {
+      const cookieJar = this.connection.webClient.cookieJar;
+      const ttwidCookie = await this._fetchTtwidCookie();
+      if (ttwidCookie) {
+        await cookieJar.setCookie(ttwidCookie);
+        console.log('[TikTok LIVE] Đã tự động cấp cookie ttwid hợp lệ cho phiên kết nối.');
+      }
+
+      // Bảo vệ: ngăn sign server trả về header rỗng 'ttwid=' làm mất cookie ttwid
+      const origProcess = cookieJar.processSetCookieHeader.bind(cookieJar);
+      cookieJar.processSetCookieHeader = async function(header) {
+        if (header && typeof header === 'string' && header.startsWith('ttwid=') && header.split(';')[0].trim() === 'ttwid=') {
+          return;
+        }
+        return origProcess(header);
+      };
+    } catch (err) {
+      console.warn('[TikTok LIVE] Cảnh báo khi cấu hình ttwid cookie:', err.message);
+    }
+  }
+
+  /**
    * Trích xuất username TikTok sạch từ chuỗi nhập vào (hỗ trợ cả URL đầy đủ)
    */
   static extractUsername(input) {
@@ -282,6 +340,9 @@ export class TikTokService extends EventEmitter {
 
       this.connection = new WebcastPushConnection(this.channel, connOptions);
 
+      // Tự động cấp cookie ttwid hợp lệ nếu chưa có, khắc phục triệt để lỗi "Unexpected server response: 200" (ttwid_info_nil)
+      await this._ensureValidTtwidCookie();
+
       this._setupListeners();
 
       const state = await this.connection.connect();
@@ -317,6 +378,8 @@ export class TikTokService extends EventEmitter {
         errMsg = `Không tìm thấy phòng LIVE của @${this.channel}. Hãy kiểm tra xem kênh ĐANG PHÁT TRỰC TIẾP trên TikTok hay không và nhập đúng Username.`;
       } else if (allMsgs.includes('rate limit')) {
         errMsg = 'Địa chỉ IP của máy tính đang bị TikTok hoặc máy chủ ký tạm giới hạn tần suất (Rate Limit). Vui lòng thử lại sau vài phút hoặc đổi sang mạng 4G/DNS khác.';
+      } else if (allMsgs.includes('unexpected server response: 200')) {
+        errMsg = 'Máy chủ TikTok từ chối nâng cấp kết nối WebSocket (Handshake thất bại do thiếu cookie hợp lệ hoặc IP bị chặn). Ứng dụng đã thử tự động cấp lại ttwid cookie, vui lòng thử lại sau ít giây hoặc nhập Session ID trong Cài đặt nâng cao.';
       } else {
         errMsg = err?.message || 'Không thể kết nối tới TikTok Live. Kênh có thể chưa phát live.';
       }
