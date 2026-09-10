@@ -25,6 +25,11 @@ export class TikTokService extends EventEmitter {
       totalGifts: 0,
       currentViewers: 0
     };
+    this.isExplicitStop = false;
+    this.reconnectAttempts = 0;
+    this.maxReconnectAttempts = 10;
+    this.reconnectTimer = null;
+    this.isReconnecting = false;
   }
 
   /**
@@ -320,6 +325,13 @@ export class TikTokService extends EventEmitter {
     this.settings = { ...this.settings, ...customSettings };
     this.sessionStartTime = new Date();
     this.status = 'connecting';
+    this.isExplicitStop = false;
+    this.reconnectAttempts = 0;
+    this.isReconnecting = false;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     console.log(`\n[TikTok LIVE] Bắt đầu kết nối tới kênh @${this.channel}...`);
     this.emit('status', { status: this.status, channel: this.channel, message: `Đang kết nối tới @${this.channel}...` });
 
@@ -384,8 +396,8 @@ export class TikTokService extends EventEmitter {
       let errMsg = '';
       if (allMsgs.includes('enotfound') || allMsgs.includes('etimedout') || allMsgs.includes('econnrefused') || allMsgs.includes('fetch failed')) {
         errMsg = 'Lỗi mạng hoặc Tường lửa (Firewall): Máy tính không thể kết nối tới máy chủ TikTok. Vui lòng kiểm tra Internet, tắt hoặc cho phép Windows Defender Firewall cho file .exe, hoặc đổi DNS sang 8.8.8.8.';
-      } else if (allMsgs.includes('failed to retrieve room id') || allMsgs.includes('user_not_found') || allMsgs.includes('offline')) {
-        errMsg = `Không tìm thấy phòng LIVE của @${this.channel}. Hãy kiểm tra xem kênh ĐANG PHÁT TRỰC TIẾP trên TikTok hay không và nhập đúng Username.`;
+      } else if (allMsgs.includes('failed to retrieve room id') || allMsgs.includes('user_not_found') || allMsgs.includes('offline') || allMsgs.includes("isn't online") || allMsgs.includes('not online')) {
+        errMsg = `Kênh @${this.channel} hiện không phát trực tiếp (Offline). Vui lòng kiểm tra xem kênh ĐANG PHÁT TRỰC TIẾP trên TikTok hay không và nhập đúng Username.`;
       } else if (allMsgs.includes('rate limit')) {
         errMsg = 'Địa chỉ IP của máy tính đang bị TikTok hoặc máy chủ ký tạm giới hạn tần suất (Rate Limit). Vui lòng thử lại sau vài phút hoặc đổi sang mạng 4G/DNS khác.';
       } else if (allMsgs.includes('unexpected server response: 200')) {
@@ -407,6 +419,14 @@ export class TikTokService extends EventEmitter {
    * Dừng kết nối
    */
   async stop() {
+    this.isExplicitStop = true;
+    this.isReconnecting = false;
+    this.reconnectAttempts = 0;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
     if (this.connection) {
       try {
         await this.connection.disconnect();
@@ -671,6 +691,12 @@ export class TikTokService extends EventEmitter {
 
     // 6. Phiên Live kết thúc
     this.connection.on('streamEnd', () => {
+      this.isExplicitStop = true;
+      if (this.reconnectTimer) {
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+      }
+      this.isReconnecting = false;
       this.status = 'disconnected';
       this.emit('status', {
         status: 'disconnected',
@@ -682,24 +708,131 @@ export class TikTokService extends EventEmitter {
     // 7. Lỗi kết nối
     this.connection.on('error', (err) => {
       console.error('TikTok Connection Error:', err?.message || err);
-      this.emit('status', {
-        status: 'error',
-        channel: this.channel,
-        message: `Lỗi kết nối: ${err?.message || 'Không xác định'}`
-      });
-    });
-
-    // 8. Đứt kết nối
-    this.connection.on('disconnected', () => {
-      if (this.status !== 'idle') {
-        this.status = 'disconnected';
+      if (!this.isExplicitStop && this.status === 'connected') {
+        this._scheduleReconnect(`Lỗi kết nối socket: ${err?.message || 'Không xác định'}`);
+      } else {
         this.emit('status', {
-          status: 'disconnected',
+          status: 'error',
           channel: this.channel,
-          message: 'Mất kết nối với phiên LIVE.'
+          message: `Lỗi kết nối: ${err?.message || 'Không xác định'}`
         });
       }
     });
+
+    // 8. Đứt kết nối
+    this.connection.on('disconnected', (reason) => {
+      if (this.isExplicitStop || this.status === 'idle') {
+        return;
+      }
+      const reasonStr = reason?.reason || reason || '';
+      console.warn(`[TikTok LIVE] Mất kết nối tới @${this.channel}${reasonStr ? ` (${reasonStr})` : ''}. Tự động kích hoạt kết nối lại...`);
+      this._scheduleReconnect('Mất kết nối với phiên LIVE.');
+    });
+  }
+
+  /**
+   * Tự động lên lịch kết nối lại khi bị đứt mạng hoặc ngắt kết nối đột ngột
+   */
+  _scheduleReconnect(reasonMessage = '') {
+    if (this.isExplicitStop || this.isReconnecting) return;
+
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      this.status = 'disconnected';
+      this.isReconnecting = false;
+      const msg = `Mất kết nối. Đã thử tự động kết nối lại ${this.maxReconnectAttempts} lần nhưng không thành công. Vui lòng kiểm tra mạng và bấm Bắt đầu lại.`;
+      console.error(`[TikTok LIVE] ${msg}`);
+      this.emit('status', {
+        status: this.status,
+        channel: this.channel,
+        message: msg
+      });
+      return;
+    }
+
+    this.reconnectAttempts++;
+    this.isReconnecting = true;
+    this.status = 'connecting';
+
+    const delaySec = Math.min(2 + this.reconnectAttempts, 8);
+    const retryMsg = `${reasonMessage ? reasonMessage + ' ' : ''}Đang tự động kết nối lại sau ${delaySec} giây (Lần ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`;
+    console.log(`[TikTok LIVE] ${retryMsg}`);
+
+    this.emit('status', {
+      status: 'connecting',
+      channel: this.channel,
+      message: retryMsg
+    });
+
+    this.reconnectTimer = setTimeout(async () => {
+      this.reconnectTimer = null;
+      if (this.isExplicitStop) {
+        this.isReconnecting = false;
+        return;
+      }
+
+      try {
+        console.log(`[TikTok LIVE] Đang thực hiện kết nối lại lần ${this.reconnectAttempts}/${this.maxReconnectAttempts}...`);
+        if (this.connection) {
+          try {
+            await this.connection.disconnect();
+          } catch (e) {}
+          this.connection = null;
+        }
+
+        const connOptions = {
+          processInitialData: true,
+          enableExtendedGiftInfo: false,
+          enableWebsocketUpgrade: true,
+          requestPollingIntervalMs: 1500,
+          clientParams: {
+            app_language: 'vi-VN',
+            webcast_language: 'vi-VN'
+          }
+        };
+
+        if (this.settings.sessionId) {
+          connOptions.session = {
+            cookie: {
+              type: 'cookie',
+              value: {
+                sessionId: this.settings.sessionId.trim(),
+                ttTargetIdc: this.settings.ttTargetIdc?.trim() || 'useast1a'
+              }
+            }
+          };
+        }
+
+        this.connection = new WebcastPushConnection(this.channel, connOptions);
+        await this._ensureValidTtwidCookie();
+        this._setupListeners();
+
+        const state = await this.connection.connect();
+        this.status = 'connected';
+        this.isReconnecting = false;
+        this.reconnectAttempts = 0;
+        this.stats.currentViewers = state?.roomInfo?.user_count || this.stats.currentViewers || 0;
+
+        console.log(`✅ [TikTok LIVE] Đã tự động kết nối lại THÀNH CÔNG tới @${this.channel} (Room ID: ${state?.roomId || 'N/A'})!`);
+        this.emit('status', {
+          status: this.status,
+          channel: this.channel,
+          message: `Đã tự động kết nối lại thành công tới LIVE của @${this.channel}!`,
+          roomInfo: state?.roomInfo
+        });
+        this.emit('stats', this.stats);
+      } catch (err) {
+        console.warn(`[TikTok LIVE] Lần kết nối lại ${this.reconnectAttempts} thất bại: ${err?.message || err}`);
+        this.isReconnecting = false;
+        if (!this.isExplicitStop) {
+          this._scheduleReconnect('Kết nối lại chưa thành công.');
+        }
+      }
+    }, delaySec * 1000);
   }
 
   /**
